@@ -1,0 +1,1261 @@
+import json
+import os
+import shutil
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk, ImageDraw, ImageFont
+
+MAX_BASE_WIDTH  = 960
+MAX_BASE_HEIGHT = 680
+MIN_ZOOM, MAX_ZOOM, ZOOM_STEP = 0.1, 8.0, 0.25
+
+CLASSES = {
+    "Human":    {"color": "#00E5FF", "key": "1"},
+    "Umbrella": {"color": "#FFD600", "key": "2"},
+    "Pickets":  {"color": "#FF3D71", "key": "3"},
+}
+
+THEMES = {
+    "dark": {
+        "bg":          "#0D0D12",
+        "toolbar":     "#131320",
+        "sidebar":     "#0F0F1A",
+        "canvas_bg":   "#080810",
+        "sep":         "#1A1A28",
+        "fg_dim":      "#333",
+        "fg_mid":      "#555",
+        "fg_text":     "#888",
+        "fg_bright":   "#EEE",
+        "btn_bg":      "#1A1A28",
+        "btn_fg":      "#AAA",
+        "accent":      "#00E5FF",
+        "accent_fg":   "#000",
+        "zoom_fg":     "#555",
+        "list_bg":     "#080810",
+        "list_fg":     "#888",
+        "select_bg":   "#1E3A4A",
+        "select_fg":   "#00E5FF",
+        "tab_bg":      "#1A1A24",
+        "tab_fg":      "#888",
+        "tab_sel_bg":  "#0D0D12",
+        "tab_sel_fg":  "#00E5FF",
+    },
+    "light": {
+        "bg":          "#F0F2F7",
+        "toolbar":     "#FFFFFF",
+        "sidebar":     "#E8EBF2",
+        "canvas_bg":   "#D8DCE8",
+        "sep":         "#C8CCd8",
+        "fg_dim":      "#BBBBCC",
+        "fg_mid":      "#888899",
+        "fg_text":     "#444455",
+        "fg_bright":   "#111122",
+        "btn_bg":      "#DDDDE8",
+        "btn_fg":      "#333344",
+        "accent":      "#0077CC",
+        "accent_fg":   "#FFFFFF",
+        "zoom_fg":     "#888",
+        "list_bg":     "#FFFFFF",
+        "list_fg":     "#333",
+        "select_bg":   "#CCE8FF",
+        "select_fg":   "#0055AA",
+        "tab_bg":      "#E0E3EE",
+        "tab_fg":      "#666",
+        "tab_sel_bg":  "#F0F2F7",
+        "tab_sel_fg":  "#0077CC",
+    },
+}
+
+def hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+class CrowdAnnotatorPro:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("CrowdLabel Pro v3")
+
+        self.theme_name = "dark"
+        self.T = THEMES["dark"]
+
+                     
+        self.image_path      = None
+        self.original_image  = None
+        self.base_scale      = 1.0
+        self.zoom            = 1.0
+        self.display_width   = 0
+        self.display_height  = 0
+        self.photo           = None
+        self.last_mouse_win_x = None
+        self.last_mouse_win_y = None
+
+                     
+        self.boxes        = []                      
+        self.undo_stack   = []                                    
+        self.redo_stack   = []                                    
+
+                   
+        self.selected_idx   = None                                    
+        self.select_mode    = False                                          
+
+                    
+        self.drag_start         = None
+        self.current_drag_rect_id = None
+
+                      
+        self.active_class = tk.StringVar(value="Human")
+
+                      
+        self.review_image_path = None
+        self.review_json_path  = None
+        self.review_data       = None
+        self.review_photo      = None
+        self.review_base_scale = 1.0
+
+        self._build_ui()
+        self._bind_keys()
+        self._apply_theme()
+
+ 
+    def _build_ui(self):
+        T = self.T
+        self.root.configure(bg=T["bg"])
+
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+        self._style_notebook()
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.tab_annotate = tk.Frame(self.notebook, bg=T["bg"])
+        self.tab_review   = tk.Frame(self.notebook, bg=T["bg"])
+        self.notebook.add(self.tab_annotate, text="  ✏  ANNOTATE  ")
+        self.notebook.add(self.tab_review,   text="  🔍  REVIEW JSON  ")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+        self._build_annotate_tab()
+        self._build_review_tab()
+
+    def _style_notebook(self):
+        T = self.T
+        self.style.configure("TNotebook", background=T["bg"], borderwidth=0)
+        self.style.configure("TNotebook.Tab", background=T["tab_bg"],
+                             foreground=T["tab_fg"], padding=[16, 8],
+                             font=("Courier New", 10, "bold"))
+        self.style.map("TNotebook.Tab",
+                       background=[("selected", T["tab_sel_bg"])],
+                       foreground=[("selected", T["tab_sel_fg"])])
+
+                            
+    def _build_annotate_tab(self):
+        T = self.T
+        p = self.tab_annotate
+
+                                                                           
+        self.toolbar = tk.Frame(p, bg=T["toolbar"], pady=8)
+        self.toolbar.pack(side=tk.TOP, fill=tk.X)
+
+                           
+        self.btn_save = self._tb_btn(self.toolbar, "💾 Save All", self.save_all,
+                                     key="btn_save", disabled=True, accent=True)
+        self.btn_save.pack(side=tk.RIGHT, padx=(2, 10))
+
+        self.btn_theme = tk.Button(
+            self.toolbar, text="☀ Light", bg=T["btn_bg"], fg=T["fg_text"],
+            relief=tk.FLAT, bd=0, padx=10, pady=5,
+            font=("Courier New", 9, "bold"), cursor="hand2",
+            command=self.toggle_theme)
+        self.btn_theme.pack(side=tk.RIGHT, padx=2)
+
+        self._tb_btn(self.toolbar, "📂 Open Image", self.open_image,
+                     key="btn_open").pack(side=tk.LEFT, padx=(10, 2))
+        self._tb_btn(self.toolbar, "✕ Clear", self.clear_loaded,
+                     key="btn_clear_load", disabled=True).pack(side=tk.LEFT, padx=(2, 4))
+        self._tb_btn(self.toolbar, "🔄 Resume from JSON", self.resume_from_json,
+                     key="btn_resume").pack(side=tk.LEFT, padx=(2, 4))
+
+        self._sep(self.toolbar)
+
+                       
+        tk.Label(self.toolbar, text="CLASS:", bg=T["toolbar"],
+                 fg=T["fg_mid"], font=("Courier New", 8, "bold")).pack(side=tk.LEFT, padx=(8, 4))
+
+        self.class_buttons = {}
+        for cls, cfg in CLASSES.items():
+            btn = tk.Button(
+                self.toolbar, text=f"[{cfg['key']}] {cls}",
+                bg=T["btn_bg"], fg=cfg["color"],
+                activebackground=cfg["color"], activeforeground="#000",
+                relief=tk.FLAT, bd=0, padx=10, pady=5,
+                font=("Courier New", 9, "bold"), cursor="hand2",
+                command=lambda c=cls: self._set_class(c)
+            )
+            btn.pack(side=tk.LEFT, padx=2)
+            self.class_buttons[cls] = btn
+
+        self._sep(self.toolbar)
+
+                                    
+        self.mode_var = tk.StringVar(value="draw")
+        self.btn_draw = tk.Button(
+            self.toolbar, text="✏ Draw", bg=T["accent"], fg=T["accent_fg"],
+            relief=tk.FLAT, bd=0, padx=10, pady=5,
+            font=("Courier New", 9, "bold"), cursor="hand2",
+            command=lambda: self._set_mode("draw"))
+        self.btn_draw.pack(side=tk.LEFT, padx=2)
+
+        self.btn_select = tk.Button(
+            self.toolbar, text="⬚ Select", bg=T["btn_bg"], fg=T["fg_text"],
+            relief=tk.FLAT, bd=0, padx=10, pady=5,
+            font=("Courier New", 9, "bold"), cursor="hand2",
+            command=lambda: self._set_mode("select"))
+        self.btn_select.pack(side=tk.LEFT, padx=2)
+
+        self._sep(self.toolbar)
+
+                                                   
+        self.btn_undo  = self._tb_btn(self.toolbar, "↩ Undo",     self.undo,           key="btn_undo",  disabled=True)
+        self.btn_undo.pack(side=tk.LEFT, padx=2)
+        self.btn_redo  = self._tb_btn(self.toolbar, "↪ Redo",     self.redo,           key="btn_redo",  disabled=True)
+        self.btn_redo.pack(side=tk.LEFT, padx=2)
+        self.btn_del   = self._tb_btn(self.toolbar, "🗑 Del Box",  self.delete_selected, key="btn_del",   disabled=True)
+        self.btn_del.pack(side=tk.LEFT, padx=2)
+        self.btn_clr   = self._tb_btn(self.toolbar, "☠ Clear All", self.clear_all,      key="btn_clr",   disabled=True)
+        self.btn_clr.pack(side=tk.LEFT, padx=2)
+
+        self._sep(self.toolbar)
+
+              
+        self._tb_btn(self.toolbar, "＋", self.zoom_in,   small=True).pack(side=tk.LEFT, padx=1)
+        self._tb_btn(self.toolbar, "－", self.zoom_out,  small=True).pack(side=tk.LEFT, padx=1)
+        self._tb_btn(self.toolbar, "⊙", self.reset_zoom, small=True).pack(side=tk.LEFT, padx=1)
+        self.zoom_label = tk.Label(self.toolbar, text="100%", bg=T["toolbar"],
+                                   fg=T["zoom_fg"], font=("Courier New", 9))
+        self.zoom_label.pack(side=tk.LEFT, padx=6)
+
+        self._sep(self.toolbar)
+
+                                                                           
+        self.ann_main = tk.Frame(p, bg=T["bg"])
+        self.ann_main.pack(fill=tk.BOTH, expand=True)
+
+                 
+        self.sidebar = tk.Frame(self.ann_main, bg=T["sidebar"], width=210)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self.sidebar.pack_propagate(False)
+
+        self._build_sidebar()
+
+                
+        canvas_area = tk.Frame(self.ann_main, bg=T["bg"])
+        canvas_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        canvas_frame = tk.Frame(canvas_area, bg=T["bg"])
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(canvas_frame, bg=T["canvas_bg"],
+                                highlightthickness=0, cursor="crosshair")
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        y_scroll = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL,   command=self.canvas.yview)
+        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        x_scroll = tk.Scrollbar(canvas_area,  orient=tk.HORIZONTAL, command=self.canvas.xview)
+        x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
+
+        self.canvas.bind("<ButtonPress-1>",   self.on_mouse_down)
+        self.canvas.bind("<B1-Motion>",       self.on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+        self.canvas.bind("<ButtonPress-3>",   self.on_pan_start)
+        self.canvas.bind("<B3-Motion>",       self.on_pan_move)
+        self.canvas.bind("<Motion>",          self.on_mouse_move)
+        self.canvas.bind("<MouseWheel>",      self.on_scroll)
+        self.canvas.bind("<Button-4>",        lambda e: self.on_scroll(e, delta=120))
+        self.canvas.bind("<Button-5>",        lambda e: self.on_scroll(e, delta=-120))
+
+                    
+        self.status_bar = tk.Frame(p, bg=T["canvas_bg"], pady=4)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_label = tk.Label(self.status_bar, text="Open an image to begin.",
+                                     bg=T["canvas_bg"], fg=T["fg_mid"],
+                                     font=("Courier New", 9), anchor="w")
+        self.status_label.pack(side=tk.LEFT, padx=10)
+        self.cls_indicator = tk.Label(self.status_bar, text="● Human",
+                                      bg=T["canvas_bg"], fg=CLASSES["Human"]["color"],
+                                      font=("Courier New", 9, "bold"))
+        self.cls_indicator.pack(side=tk.RIGHT, padx=10)
+
+    def _build_sidebar(self):
+        T = self.T
+        sb = self.sidebar
+        for w in sb.winfo_children():
+            w.destroy()
+
+        tk.Label(sb, text="DATASET STATS", bg=T["sidebar"],
+                 fg=T["fg_dim"], font=("Courier New", 8, "bold"), pady=12).pack(fill=tk.X)
+
+        self.stat_labels = {}
+        for cls, cfg in CLASSES.items():
+            row = tk.Frame(sb, bg=T["sidebar"])
+            row.pack(fill=tk.X, padx=12, pady=3)
+            tk.Label(row, text="●", bg=T["sidebar"], fg=cfg["color"],
+                     font=("Courier New", 11)).pack(side=tk.LEFT)
+            lbl = tk.Label(row, text=f"{cls}: 0", bg=T["sidebar"],
+                           fg=T["fg_text"], font=("Courier New", 9))
+            lbl.pack(side=tk.LEFT, padx=6)
+            self.stat_labels[cls] = lbl
+
+        tk.Frame(sb, bg=T["sep"], height=1).pack(fill=tk.X, padx=12, pady=10)
+
+        self.total_label = tk.Label(sb, text="TOTAL: 0", bg=T["sidebar"],
+                                    fg=T["fg_bright"], font=("Courier New", 10, "bold"))
+        self.total_label.pack(padx=12, anchor="w")
+
+        tk.Frame(sb, bg=T["sep"], height=1).pack(fill=tk.X, padx=12, pady=10)
+
+                                        
+        tk.Label(sb, text="ANNOTATIONS", bg=T["sidebar"],
+                 fg=T["fg_dim"], font=("Courier New", 8, "bold"), pady=2).pack(fill=tk.X, padx=12, anchor="w")
+
+        list_frame = tk.Frame(sb, bg=T["sidebar"])
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        list_scroll = tk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        list_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.box_listbox = tk.Listbox(
+            list_frame, bg=T["list_bg"], fg=T["list_fg"],
+            selectbackground=T["select_bg"], selectforeground=T["select_fg"],
+            font=("Courier New", 8), relief=tk.FLAT, bd=0,
+            yscrollcommand=list_scroll.set, activestyle="none",
+            highlightthickness=0
+        )
+        self.box_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scroll.config(command=self.box_listbox.yview)
+        self.box_listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
+
+        tk.Frame(sb, bg=T["sep"], height=1).pack(fill=tk.X, padx=12, pady=6)
+
+                   
+        tk.Label(sb, text="SHORTCUTS", bg=T["sidebar"],
+                 fg=T["fg_dim"], font=("Courier New", 8, "bold"), pady=2).pack(fill=tk.X, padx=12, anchor="w")
+        shortcuts = [
+            ("1/2/3", "Switch class"),
+            ("E",     "Draw mode"),
+            ("S",     "Select mode"),
+            ("T",     "Toggle theme"),
+            ("Ctrl+Z","Undo"),
+            ("Ctrl+Y","Redo"),
+            ("Del",   "Delete selected"),
+            ("Scroll","Zoom"),
+            ("R-drag","Pan"),
+        ]
+        for key, desc in shortcuts:
+            row = tk.Frame(sb, bg=T["sidebar"])
+            row.pack(fill=tk.X, padx=12, pady=1)
+            tk.Label(row, text=key, bg=T["sep"], fg=T["accent"],
+                     font=("Courier New", 7), padx=3).pack(side=tk.LEFT)
+            tk.Label(row, text=f"  {desc}", bg=T["sidebar"], fg=T["fg_dim"],
+                     font=("Courier New", 7)).pack(side=tk.LEFT)
+
+                          
+    def _build_review_tab(self):
+        T = self.T
+        p = self.tab_review
+
+        self.rev_toolbar = tk.Frame(p, bg=T["toolbar"], pady=8)
+        self.rev_toolbar.pack(side=tk.TOP, fill=tk.X)
+
+        self._tb_btn(self.rev_toolbar, "📂 Load Image", self.review_load_image).pack(side=tk.LEFT, padx=(10, 2))
+        self._tb_btn(self.rev_toolbar, "✕ Clear Image", self.review_clear_image).pack(side=tk.LEFT, padx=2)
+        self._sep(self.rev_toolbar)
+        self._tb_btn(self.rev_toolbar, "📋 Load JSON",  self.review_load_json).pack(side=tk.LEFT, padx=2)
+        self._tb_btn(self.rev_toolbar, "✕ Clear JSON",  self.review_clear_json).pack(side=tk.LEFT, padx=2)
+        self._sep(self.rev_toolbar)
+        self.btn_review_run = self._tb_btn(self.rev_toolbar, "🔍 Show Annotations",
+                                           self.review_show, disabled=True, accent=True)
+        self.btn_review_run.pack(side=tk.LEFT, padx=4)
+
+        self.review_status = tk.Label(self.rev_toolbar, text="Load an image + JSON to review.",
+                                      bg=T["toolbar"], fg=T["fg_mid"], font=("Courier New", 9))
+        self.review_status.pack(side=tk.LEFT, padx=16)
+
+        rev_main = tk.Frame(p, bg=T["bg"])
+        rev_main.pack(fill=tk.BOTH, expand=True)
+
+                             
+        self.rev_stats_frame = tk.Frame(rev_main, bg=T["sidebar"], width=230)
+        self.rev_stats_frame.pack(side=tk.RIGHT, fill=tk.Y)
+        self.rev_stats_frame.pack_propagate(False)
+
+        tk.Label(self.rev_stats_frame, text="JSON SUMMARY", bg=T["sidebar"],
+                 fg=T["fg_dim"], font=("Courier New", 8, "bold"), pady=12).pack(fill=tk.X)
+
+        self.review_stat_frame = tk.Frame(self.rev_stats_frame, bg=T["sidebar"])
+        self.review_stat_frame.pack(fill=tk.X, padx=12)
+
+        self.review_boxes_list = tk.Text(
+            self.rev_stats_frame, bg=T["list_bg"], fg=T["list_fg"],
+            font=("Courier New", 8), relief=tk.FLAT, wrap=tk.WORD,
+            state=tk.DISABLED, highlightthickness=0
+        )
+        self.review_boxes_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+                       
+        canvas_frame2 = tk.Frame(rev_main, bg=T["bg"])
+        canvas_frame2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.review_canvas = tk.Canvas(canvas_frame2, bg=T["canvas_bg"], highlightthickness=0)
+        self.review_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        y2 = tk.Scrollbar(canvas_frame2, orient=tk.VERTICAL, command=self.review_canvas.yview)
+        y2.pack(side=tk.RIGHT, fill=tk.Y)
+        x2 = tk.Scrollbar(p, orient=tk.HORIZONTAL, command=self.review_canvas.xview)
+        x2.pack(side=tk.BOTTOM, fill=tk.X)
+        self.review_canvas.configure(xscrollcommand=x2.set, yscrollcommand=y2.set)
+
+        self.review_canvas.bind("<MouseWheel>", self._review_scroll)
+        self.review_canvas.bind("<Button-4>", lambda e: self._review_scroll(e, delta=120))
+        self.review_canvas.bind("<Button-5>", lambda e: self._review_scroll(e, delta=-120))
+        self.review_canvas.bind("<ButtonPress-3>", lambda e: self.review_canvas.scan_mark(e.x, e.y))
+        self.review_canvas.bind("<B3-Motion>",     lambda e: self.review_canvas.scan_dragto(e.x, e.y, gain=1))
+
+   
+    def toggle_theme(self):
+        self.theme_name = "light" if self.theme_name == "dark" else "dark"
+        self.T = THEMES[self.theme_name]
+        self._apply_theme()
+
+    def _apply_theme(self):
+        T = self.T
+                                    
+        self.root.configure(bg=T["bg"])
+        self.tab_annotate.configure(bg=T["bg"])
+        self.tab_review.configure(bg=T["bg"])
+        self._style_notebook()
+
+                 
+        self.toolbar.configure(bg=T["toolbar"])
+        self.rev_toolbar.configure(bg=T["toolbar"])
+
+                                    
+        self._retheme_children(self.toolbar, T)
+        self._retheme_children(self.rev_toolbar, T)
+
+                 
+        self.sidebar.configure(bg=T["sidebar"])
+        self._build_sidebar()
+        self.update_stats()
+        self.refresh_box_list()
+
+                
+        self.canvas.configure(bg=T["canvas_bg"])
+        self.review_canvas.configure(bg=T["canvas_bg"])
+
+                    
+        self.status_bar.configure(bg=T["canvas_bg"])
+        self.status_label.configure(bg=T["canvas_bg"], fg=T["fg_mid"])
+        self.cls_indicator.configure(bg=T["canvas_bg"])
+
+                  
+        self.ann_main.configure(bg=T["bg"])
+
+                    
+        self.rev_stats_frame.configure(bg=T["sidebar"])
+        self.review_stat_frame.configure(bg=T["sidebar"])
+        self.review_boxes_list.configure(bg=T["list_bg"], fg=T["list_fg"])
+
+                            
+        self.btn_theme.configure(
+            text="☀ Light" if self.theme_name == "dark" else "🌙 Dark",
+            bg=T["btn_bg"], fg=T["fg_text"])
+
+                      
+        self._refresh_mode_buttons()
+        self._update_class_buttons()
+        self.update_display_image()
+
+    def _retheme_children(self, widget, T):
+        for child in widget.winfo_children():
+            cls = child.winfo_class()
+            try:
+                if cls in ("Label", "Frame"):
+                    child.configure(bg=T["toolbar"])
+                elif cls == "Button":
+                    child.configure(bg=T["btn_bg"], fg=T["btn_fg"],
+                                    activebackground=T["accent"],
+                                    activeforeground=T["accent_fg"],
+                                    disabledforeground=T["fg_dim"])
+            except:
+                pass
+
+    def _tb_btn(self, parent, text, command, key=None, disabled=False,
+                small=False, accent=False):
+        T = self.T
+        bg = T["accent"] if accent else T["btn_bg"]
+        fg = T["accent_fg"] if accent else T["btn_fg"]
+        state = tk.DISABLED if disabled else tk.NORMAL
+        font  = ("Courier New", 8, "bold") if small else ("Courier New", 9, "bold")
+        padx  = 6 if small else 10
+        pady  = 4 if small else 5
+        btn = tk.Button(parent, text=text, command=command,
+                        bg=bg, fg=fg, activebackground=T["accent"],
+                        activeforeground=T["accent_fg"],
+                        relief=tk.FLAT, bd=0, font=font,
+                        padx=padx, pady=pady, cursor="hand2",
+                        state=state, disabledforeground=T["fg_dim"])
+        if key:
+            setattr(self, key, btn)
+        return btn
+
+    def _sep(self, parent):
+        T = self.T
+        tk.Label(parent, text="│", bg=T["toolbar"], fg=T["fg_dim"]).pack(side=tk.LEFT, padx=4)
+
+    def _bind_keys(self):
+        self.root.bind("1",           lambda e: self._set_class("Human"))
+        self.root.bind("2",           lambda e: self._set_class("Umbrella"))
+        self.root.bind("3",           lambda e: self._set_class("Pickets"))
+        self.root.bind("e",           lambda e: self._set_mode("draw"))
+        self.root.bind("s",           lambda e: self._set_mode("select"))
+        self.root.bind("t",           lambda e: self.toggle_theme())
+        self.root.bind("<Control-z>", lambda e: self.undo())
+        self.root.bind("<Control-y>", lambda e: self.redo())
+        self.root.bind("<Delete>",    lambda e: self.delete_selected())
+
+    def _on_tab_change(self, event):
+        pass
+
+    def _set_class(self, cls):
+        self.active_class.set(cls)
+        self._update_class_buttons()
+        color = CLASSES[cls]["color"]
+        self.cls_indicator.config(text=f"● {cls}", fg=color)
+
+    def _update_class_buttons(self):
+        T = self.T
+        active = self.active_class.get()
+        for cls, btn in self.class_buttons.items():
+            cfg = CLASSES[cls]
+            if cls == active:
+                btn.config(bg=cfg["color"], fg="#000")
+            else:
+                btn.config(bg=T["btn_bg"], fg=cfg["color"])
+
+    def _set_mode(self, mode):
+        self.mode_var.set(mode)
+        if mode == "select":
+            self.canvas.config(cursor="hand2")
+        else:
+            self.canvas.config(cursor="crosshair")
+            self.selected_idx = None
+        self._refresh_mode_buttons()
+        self.update_display_image()
+
+    def _refresh_mode_buttons(self):
+        T = self.T
+        mode = self.mode_var.get()
+        if mode == "draw":
+            self.btn_draw.config(bg=T["accent"], fg=T["accent_fg"])
+            self.btn_select.config(bg=T["btn_bg"], fg=T["fg_text"])
+        else:
+            self.btn_draw.config(bg=T["btn_bg"], fg=T["fg_text"])
+            self.btn_select.config(bg=T["accent"], fg=T["accent_fg"])
+
+    def open_image(self):
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
+        if not path: return
+        try:
+            img = Image.open(path).convert("RGB")
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot open image:\n{e}")
+            return
+
+        self.image_path     = path
+        self.original_image = img
+        w, h = img.size
+        self.base_scale = min(MAX_BASE_WIDTH / w, MAX_BASE_HEIGHT / h, 1.0)
+        self.zoom = 1.0
+        self.boxes.clear()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.selected_idx = None
+
+        self.zoom_label.config(text="100%")
+        self.update_display_image()
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_status(f"Loaded: {os.path.basename(path)}  ({w}×{h})")
+
+    def resume_from_json(self):
+        """Load a previously saved _labels.json and resume editing its annotations."""
+        json_path = filedialog.askopenfilename(
+            title="Select Labels JSON to Resume",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if not json_path:
+            return
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot read JSON:\n{e}")
+            return
+
+                                                                                
+        img_path = None
+        json_dir = os.path.dirname(json_path)
+
+                                                                              
+        stored = data.get("image_path", "")
+        if stored:
+            candidate = os.path.normpath(os.path.join(json_dir, stored))
+            if os.path.isfile(candidate):
+                img_path = candidate
+
+                                                                                            
+        if not img_path:
+            stem = data.get("image_id", "")
+            for ext in (".jpg", ".jpeg", ".png", ".bmp"):
+                candidate = os.path.join(json_dir, stem + ext)
+                if os.path.isfile(candidate):
+                    img_path = candidate
+                    break
+
+                                                              
+        if not img_path:
+            messagebox.showinfo(
+                "Locate Image",
+                "The original image could not be found automatically.\n"
+                "Please select it manually.")
+            img_path = filedialog.askopenfilename(
+                title="Locate the original image",
+                filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
+            if not img_path:
+                return
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot open image:\n{e}")
+            return
+
+                                                                  
+        stored_w = data.get("image_width")
+        stored_h = data.get("image_height")
+        if stored_w and stored_h and (img.width != stored_w or img.height != stored_h):
+            if not messagebox.askyesno(
+                    "Size Mismatch",
+                    f"JSON says image is {stored_w}×{stored_h} but the file is "
+                    f"{img.width}×{img.height}.\n\nContinue anyway?"):
+                return
+
+                               
+        raw_boxes = data.get("boxes", [])
+        boxes = []
+        for b in raw_boxes:
+            if all(k in b for k in ("x_min", "y_min", "x_max", "y_max", "class")):
+                boxes.append({
+                    "class": b["class"],
+                    "x_min": float(b["x_min"]),
+                    "y_min": float(b["y_min"]),
+                    "x_max": float(b["x_max"]),
+                    "y_max": float(b["y_max"]),
+                })
+
+                                            
+        self.image_path     = img_path
+        self.original_image = img
+        w, h = img.size
+        self.base_scale = min(MAX_BASE_WIDTH / w, MAX_BASE_HEIGHT / h, 1.0)
+        self.zoom = 1.0
+        self.boxes = boxes
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.selected_idx = None
+
+        self.zoom_label.config(text="100%")
+        self.update_display_image()
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_status(
+            f"Resumed: {os.path.basename(img_path)}  —  {len(self.boxes)} annotation(s) loaded")
+
+    def clear_loaded(self):
+        """Unload image + all annotations."""
+        if not messagebox.askyesno("Clear", "Unload image and all annotations?"):
+            return
+        self.image_path     = None
+        self.original_image = None
+        self.photo          = None
+        self.boxes.clear()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.selected_idx   = None
+        self.canvas.delete("all")
+        self.canvas.config(scrollregion=(0, 0, 0, 0))
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_status("Image cleared. Open a new image to annotate.")
+
+    def update_display_image(self):
+        if self.original_image is None:
+            return
+        total = self.base_scale * self.zoom
+        self.display_width  = max(1, int(self.original_image.width  * total))
+        self.display_height = max(1, int(self.original_image.height * total))
+
+        resized = self.original_image.resize((self.display_width, self.display_height), Image.LANCZOS)
+        self.photo = ImageTk.PhotoImage(resized)
+
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        self.canvas.config(scrollregion=(0, 0, self.display_width, self.display_height))
+        self.draw_annotations()
+
+    def draw_annotations(self):
+        if not self.original_image: return
+        sx = self.display_width  / self.original_image.width
+        sy = self.display_height / self.original_image.height
+
+        for i, b in enumerate(self.boxes):
+            cfg   = CLASSES.get(b["class"], {"color": "#FFF"})
+            color = cfg["color"]
+            x0, y0 = b["x_min"] * sx, b["y_min"] * sy
+            x1, y1 = b["x_max"] * sx, b["y_max"] * sy
+
+            is_sel = (i == self.selected_idx)
+            width  = 3 if is_sel else 2
+            dash   = () if not is_sel else (6, 3)
+
+            self.canvas.create_rectangle(x0, y0, x1, y1,
+                                         outline=color, width=width, dash=dash, tags="ann")
+
+            if is_sel:
+                                   
+                cs = 6
+                for cx, cy in [(x0,y0),(x1,y0),(x0,y1),(x1,y1)]:
+                    self.canvas.create_rectangle(cx-cs, cy-cs, cx+cs, cy+cs,
+                                                 fill=color, outline="", tags="ann")
+
+            label = f"#{i+1} {b['class']}"
+            tw = len(label) * 6.5 + 6
+            self.canvas.create_rectangle(x0, y0 - 16, x0 + tw, y0,
+                                         fill=color, outline="", tags="ann")
+            self.canvas.create_text(x0 + 3, y0 - 8, text=label,
+                                    anchor="w", fill="#000",
+                                    font=("Courier New", 8, "bold"), tags="ann")
+
+    def on_scroll(self, event, delta=None):
+        if self.original_image is None: return
+        d = delta if delta is not None else event.delta
+        old = self.zoom
+        self.zoom = min(self.zoom + ZOOM_STEP, MAX_ZOOM) if d > 0 else max(self.zoom - ZOOM_STEP, MIN_ZOOM)
+        self._apply_zoom(old)
+
+    def zoom_in(self):
+        if not self.original_image: return
+        old = self.zoom; self.zoom = min(self.zoom + ZOOM_STEP, MAX_ZOOM); self._apply_zoom(old)
+
+    def zoom_out(self):
+        if not self.original_image: return
+        old = self.zoom; self.zoom = max(self.zoom - ZOOM_STEP, MIN_ZOOM); self._apply_zoom(old)
+
+    def reset_zoom(self):
+        if not self.original_image: return
+        old = self.zoom; self.zoom = 1.0; self._apply_zoom(old)
+
+    def _apply_zoom(self, old_zoom):
+        self.zoom_label.config(text=f"{int(self.zoom * 100)}%")
+        if self.last_mouse_win_x is None:
+            self.update_display_image(); return
+
+        old_total = self.base_scale * old_zoom
+        mx = self.canvas.canvasx(self.last_mouse_win_x)
+        my = self.canvas.canvasy(self.last_mouse_win_y)
+        ox = mx / old_total if old_total else 0
+        oy = my / old_total if old_total else 0
+
+        self.update_display_image()
+
+        nt = self.base_scale * self.zoom
+        nx, ny = ox * nt, oy * nt
+        sw, sh = self.display_width, self.display_height
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+
+        tl, tt = nx - self.last_mouse_win_x, ny - self.last_mouse_win_y
+        if sw > cw:
+            ml = sw - cw
+            self.canvas.xview_moveto(max(0, min(tl, ml)) / ml if ml else 0)
+        else:
+            self.canvas.xview_moveto(0)
+        if sh > ch:
+            mt = sh - ch
+            self.canvas.yview_moveto(max(0, min(tt, mt)) / mt if mt else 0)
+        else:
+            self.canvas.yview_moveto(0)
+
+    def on_mouse_move(self, event):
+        self.last_mouse_win_x = event.x
+        self.last_mouse_win_y = event.y
+
+    def on_mouse_down(self, event):
+        if self.original_image is None: return
+        xd = self.canvas.canvasx(event.x)
+        yd = self.canvas.canvasy(event.y)
+
+        if self.mode_var.get() == "select":
+            self._try_select(xd, yd)
+            return
+
+                   
+        self.drag_start = (xd, yd)
+        color = CLASSES[self.active_class.get()]["color"]
+        self.current_drag_rect_id = self.canvas.create_rectangle(
+            xd, yd, xd, yd, outline=color, width=2, dash=(4, 2))
+
+    def on_mouse_drag(self, event):
+        if self.original_image is None or self.drag_start is None: return
+        if self.mode_var.get() != "draw": return
+        xd = self.canvas.canvasx(event.x)
+        yd = self.canvas.canvasy(event.y)
+        x0, y0 = self.drag_start
+        self.canvas.coords(self.current_drag_rect_id, x0, y0, xd, yd)
+
+    def on_mouse_up(self, event):
+        if self.original_image is None or self.drag_start is None: return
+        if self.mode_var.get() != "draw": return
+
+        x1 = self.canvas.canvasx(event.x)
+        y1 = self.canvas.canvasy(event.y)
+        x0, y0 = self.drag_start
+
+        if self.current_drag_rect_id:
+            self.canvas.delete(self.current_drag_rect_id)
+        self.drag_start = None
+        self.current_drag_rect_id = None
+
+        xmin_d, xmax_d = sorted((x0, x1))
+        ymin_d, ymax_d = sorted((y0, y1))
+
+        if abs(xmax_d - xmin_d) < 5 or abs(ymax_d - ymin_d) < 5:
+            return
+
+        sx = self.display_width  / self.original_image.width
+        sy = self.display_height / self.original_image.height
+
+        self._snapshot()                                            
+        self.redo_stack.clear()
+
+        cls = self.active_class.get()
+        self.boxes.append({
+            "class": cls,
+            "x_min": float(xmin_d / sx),
+            "y_min": float(ymin_d / sy),
+            "x_max": float(xmax_d / sx),
+            "y_max": float(ymax_d / sy),
+        })
+
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_display_image()
+        self.update_status(f"{cls} added — {len(self.boxes)} total")
+
+    def _try_select(self, xd, yd):
+        """Click in select mode: pick topmost box under cursor."""
+        if not self.original_image: return
+        sx = self.display_width  / self.original_image.width
+        sy = self.display_height / self.original_image.height
+
+        hit = None
+        for i, b in enumerate(self.boxes):
+            x0, y0 = b["x_min"] * sx, b["y_min"] * sy
+            x1, y1 = b["x_max"] * sx, b["y_max"] * sy
+            if x0 <= xd <= x1 and y0 <= yd <= y1:
+                hit = i                               
+
+        self.selected_idx = hit
+        self.btn_del.config(state=tk.NORMAL if hit is not None else tk.DISABLED)
+
+                      
+        self.box_listbox.selection_clear(0, tk.END)
+        if hit is not None:
+            self.box_listbox.selection_set(hit)
+            self.box_listbox.see(hit)
+
+        self.update_display_image()
+
+ 
+    def on_pan_start(self, event):
+        self.canvas.scan_mark(event.x, event.y)
+
+    def on_pan_move(self, event):
+        self.canvas.scan_dragto(event.x, event.y, gain=1)
+
+    def _snapshot(self):
+        import copy
+        self.undo_stack.append(copy.deepcopy(self.boxes))
+
+    def undo(self):
+        if not self.undo_stack: return
+        import copy
+        self.redo_stack.append(copy.deepcopy(self.boxes))
+        self.boxes = self.undo_stack.pop()
+        self.selected_idx = None
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_display_image()
+        self.update_status(f"Undo — {len(self.boxes)} annotations")
+
+    def redo(self):
+        if not self.redo_stack: return
+        import copy
+        self.undo_stack.append(copy.deepcopy(self.boxes))
+        self.boxes = self.redo_stack.pop()
+        self.selected_idx = None
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_display_image()
+        self.update_status(f"Redo — {len(self.boxes)} annotations")
+
+    def delete_selected(self):
+        if self.selected_idx is None: return
+        self._snapshot()
+        self.redo_stack.clear()
+        removed = self.boxes.pop(self.selected_idx)
+        self.selected_idx = None
+        self.btn_del.config(state=tk.DISABLED)
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_display_image()
+        self.update_status(f"Deleted #{self.selected_idx or '?'} ({removed['class']})")
+
+    def clear_all(self):
+        if not self.boxes: return
+        if not messagebox.askyesno("Clear All", "Remove ALL annotations?"):
+            return
+        self._snapshot()
+        self.redo_stack.clear()
+        self.boxes.clear()
+        self.selected_idx = None
+        self.update_buttons()
+        self.update_stats()
+        self.refresh_box_list()
+        self.update_display_image()
+        self.update_status("All annotations cleared.")
+
+    def refresh_box_list(self):
+        if not hasattr(self, "box_listbox"): return
+        self.box_listbox.delete(0, tk.END)
+        for i, b in enumerate(self.boxes):
+            w = round(b["x_max"] - b["x_min"])
+            h = round(b["y_max"] - b["y_min"])
+            self.box_listbox.insert(tk.END, f"#{i+1} {b['class']}  {w}×{h}px")
+
+    def _on_listbox_select(self, event):
+        sel = self.box_listbox.curselection()
+        if not sel: return
+        idx = sel[0]
+        self.selected_idx = idx
+        self.btn_del.config(state=tk.NORMAL)
+        self._set_mode("select")
+        self.update_display_image()
+
+    def update_stats(self):
+        if not hasattr(self, "stat_labels"): return
+        counts = {cls: 0 for cls in CLASSES}
+        for b in self.boxes:
+            if b["class"] in counts:
+                counts[b["class"]] += 1
+        for cls, lbl in self.stat_labels.items():
+            lbl.config(text=f"{cls}: {counts[cls]}")
+        self.total_label.config(text=f"TOTAL: {len(self.boxes)}")
+
+    def update_buttons(self):
+        T = self.T
+        has_img = self.original_image is not None
+        has_ann = bool(self.boxes)
+        has_undo = bool(self.undo_stack)
+        has_redo = bool(self.redo_stack)
+
+        self.btn_save.config(
+            state=tk.NORMAL if has_img else tk.DISABLED,
+            bg=T["accent"] if has_img else T["btn_bg"],
+            fg=T["accent_fg"] if has_img else T["fg_dim"])
+        self.btn_undo.config(state=tk.NORMAL if has_undo else tk.DISABLED)
+        self.btn_redo.config(state=tk.NORMAL if has_redo else tk.DISABLED)
+        self.btn_clr.config( state=tk.NORMAL if has_ann  else tk.DISABLED)
+        self.btn_clear_load.config(state=tk.NORMAL if has_img else tk.DISABLED)
+
+    def update_status(self, text):
+        self.status_label.config(text=text)
+
+ 
+    def save_all(self):
+        if not self.original_image or not self.image_path:
+            messagebox.showwarning("No image", "Open an image first.")
+            return
+
+        base_dir   = os.path.dirname(self.image_path)
+        fname      = os.path.basename(self.image_path)
+        stem       = os.path.splitext(fname)[0]
+        ext        = os.path.splitext(fname)[1] or ".jpg"
+
+                                                
+        save_dir = filedialog.askdirectory(title="Choose folder to save dataset outputs")
+        if not save_dir:
+            return
+
+                                                                         
+        orig_dest = os.path.join(save_dir, fname)
+        ann_fname = f"{stem}_annotated{ext}"
+        ann_dest  = os.path.join(save_dir, ann_fname)
+        json_fname = f"{stem}_labels.json"
+        json_dest  = os.path.join(save_dir, json_fname)
+
+        existing = [f for f in (orig_dest, ann_dest, json_dest) if os.path.exists(f)]
+        if existing:
+            names = "\n".join(os.path.basename(f) for f in existing)
+            if not messagebox.askyesno("Overwrite?", f"These files already exist:\n\n{names}\n\nOverwrite them?"):
+                return
+
+        try:
+            if os.path.abspath(self.image_path) != os.path.abspath(orig_dest):
+                shutil.copy2(self.image_path, orig_dest)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not copy original:\n{e}")
+            return
+
+        annotated = self.original_image.copy()
+        draw      = ImageDraw.Draw(annotated)
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except:
+            font = ImageFont.load_default()
+
+        for i, b in enumerate(self.boxes, 1):
+            color = hex_to_rgb(CLASSES.get(b["class"], {"color": "#FFFFFF"})["color"])
+            draw.rectangle([b["x_min"], b["y_min"], b["x_max"], b["y_max"]],
+                           outline=color, width=3)
+            label = f"#{i} {b['class']}"
+            tw = len(label) * 8 + 6
+            draw.rectangle([b["x_min"], b["y_min"] - 18,
+                            b["x_min"] + tw, b["y_min"]], fill=color)
+            draw.text((b["x_min"] + 3, b["y_min"] - 17), label,
+                      fill=(0, 0, 0), font=font)
+
+        annotated.save(ann_dest)
+
+        counts = {cls: 0 for cls in CLASSES}
+        boxes_out = []
+        for i, b in enumerate(self.boxes, 1):
+            counts[b["class"]] = counts.get(b["class"], 0) + 1
+            boxes_out.append({
+                "box_id": i,
+                "class":  b["class"],
+                "x_min":  round(b["x_min"], 2),
+                "y_min":  round(b["y_min"], 2),
+                "x_max":  round(b["x_max"], 2),
+                "y_max":  round(b["y_max"], 2),
+                "width":  round(b["x_max"] - b["x_min"], 2),
+                "height": round(b["y_max"] - b["y_min"], 2),
+            })
+
+        data = {
+            "image_id":             stem,
+            "image_path":           f"./{fname}",
+            "annotated_image_path": f"./{ann_fname}",
+            "image_width":          self.original_image.width,
+            "image_height":         self.original_image.height,
+            "class_counts":         counts,
+            "total_annotations":    len(self.boxes),
+            "boxes":                boxes_out,
+        }
+
+        with open(json_dest, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        messagebox.showinfo(
+            "Saved ✓",
+            f"3 files saved to:\n{save_dir}\n\n"
+            f"① Original image:   {fname}\n"
+            f"② Annotated image:  {ann_fname}\n"
+            f"③ JSON labels:      {json_fname}\n\n"
+            f"Boxes: {len(self.boxes)} | "
+            + " | ".join(f"{cls}: {cnt}" for cls, cnt in counts.items())
+        )
+        self.update_status(f"Saved 3 outputs → {save_dir}")
+
+    def review_load_image(self):
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
+        if not path: return
+        self.review_image_path = path
+        self._update_review_status()
+        self._check_review_ready()
+
+    def review_clear_image(self):
+        self.review_image_path = None
+        self._update_review_status()
+        self._check_review_ready()
+        self.review_canvas.delete("all")
+        self.review_photo = None
+
+    def review_load_json(self):
+        path = filedialog.askopenfilename(
+            title="Select JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if not path: return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.review_data = json.load(f)
+            self.review_json_path = path
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot load JSON:\n{e}")
+            return
+        self._update_review_status()
+        self._check_review_ready()
+
+    def review_clear_json(self):
+        self.review_json_path = None
+        self.review_data      = None
+        self._update_review_status()
+        self._check_review_ready()
+                           
+        for w in self.review_stat_frame.winfo_children():
+            w.destroy()
+        self.review_boxes_list.config(state=tk.NORMAL)
+        self.review_boxes_list.delete("1.0", tk.END)
+        self.review_boxes_list.config(state=tk.DISABLED)
+
+    def _update_review_status(self):
+        parts = []
+        if self.review_image_path:
+            parts.append(f"🖼 {os.path.basename(self.review_image_path)}")
+        if self.review_json_path:
+            parts.append(f"📋 {os.path.basename(self.review_json_path)}")
+        if not parts:
+            parts = ["Load an image + JSON to review."]
+        self.review_status.config(text="   |   ".join(parts))
+
+    def _check_review_ready(self):
+        ready = bool(self.review_image_path and self.review_json_path)
+        self.btn_review_run.config(state=tk.NORMAL if ready else tk.DISABLED)
+
+    def review_show(self):
+        if not self.review_image_path or not self.review_data: return
+        try:
+            img = Image.open(self.review_image_path).convert("RGB")
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot open image:\n{e}")
+            return
+
+        boxes = self.review_data.get("boxes", [])
+        iw, ih = img.size
+
+        ann  = img.copy()
+        draw = ImageDraw.Draw(ann)
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except:
+            font = ImageFont.load_default()
+
+        for b in boxes:
+            cls   = b.get("class", "Unknown")
+            color = hex_to_rgb(CLASSES.get(cls, {"color": "#FFFFFF"})["color"])
+            bid   = b.get("box_id", "?")
+            draw.rectangle([b["x_min"], b["y_min"], b["x_max"], b["y_max"]],
+                           outline=color, width=3)
+            label = f"#{bid} {cls}"
+            draw.rectangle([b["x_min"], b["y_min"] - 18,
+                            b["x_min"] + len(label)*8+6, b["y_min"]], fill=color)
+            draw.text((b["x_min"]+3, b["y_min"]-17), label, fill=(0,0,0), font=font)
+
+        scale = min(MAX_BASE_WIDTH / iw, MAX_BASE_HEIGHT / ih, 1.0)
+        dw, dh = int(iw * scale), int(ih * scale)
+        resized = ann.resize((dw, dh), Image.LANCZOS)
+        self.review_photo = ImageTk.PhotoImage(resized)
+        self.review_canvas.delete("all")
+        self.review_canvas.create_image(0, 0, anchor="nw", image=self.review_photo)
+        self.review_canvas.config(scrollregion=(0, 0, dw, dh))
+
+               
+        for w in self.review_stat_frame.winfo_children():
+            w.destroy()
+        T = self.T
+
+        class_counts = self.review_data.get("class_counts", {})
+        if not class_counts:
+            class_counts = {}
+            for b in boxes:
+                cls = b.get("class", "Unknown")
+                class_counts[cls] = class_counts.get(cls, 0) + 1
+
+        tk.Label(self.review_stat_frame, text="CLASS COUNTS", bg=T["sidebar"],
+                 fg=T["fg_dim"], font=("Courier New", 8, "bold"), pady=4).pack(anchor="w")
+
+        for cls, count in class_counts.items():
+            cfg = CLASSES.get(cls, {"color": "#FFF"})
+            row = tk.Frame(self.review_stat_frame, bg=T["sidebar"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text="●", bg=T["sidebar"], fg=cfg["color"],
+                     font=("Courier New", 12)).pack(side=tk.LEFT)
+            tk.Label(row, text=f" {cls}", bg=T["sidebar"], fg=T["fg_text"],
+                     font=("Courier New", 9)).pack(side=tk.LEFT)
+            tk.Label(row, text=str(count), bg=T["sidebar"], fg=cfg["color"],
+                     font=("Courier New", 11, "bold")).pack(side=tk.RIGHT)
+
+        tk.Frame(self.review_stat_frame, bg=T["sep"], height=1).pack(fill=tk.X, pady=8)
+        total = self.review_data.get("total_annotations", len(boxes))
+        tk.Label(self.review_stat_frame, text=f"TOTAL  {total}",
+                 bg=T["sidebar"], fg=T["fg_bright"],
+                 font=("Courier New", 10, "bold")).pack(anchor="w")
+        tk.Frame(self.review_stat_frame, bg=T["sep"], height=1).pack(fill=tk.X, pady=8)
+        tk.Label(self.review_stat_frame,
+                 text=f"Image  {self.review_data.get('image_width',iw)}×{self.review_data.get('image_height',ih)}",
+                 bg=T["sidebar"], fg=T["fg_mid"], font=("Courier New", 8)).pack(anchor="w")
+        tk.Label(self.review_stat_frame,
+                 text=f"ID: {self.review_data.get('image_id','—')}",
+                 bg=T["sidebar"], fg=T["fg_mid"], font=("Courier New", 8)).pack(anchor="w")
+
+                  
+        self.review_boxes_list.config(state=tk.NORMAL)
+        self.review_boxes_list.delete("1.0", tk.END)
+        self.review_boxes_list.insert(tk.END, f"─── {len(boxes)} BOXES ───\n\n")
+        for b in boxes:
+            cls   = b.get("class", "?")
+            bid   = b.get("box_id", "?")
+            ww    = round(b.get("width",  b["x_max"]-b["x_min"]), 1)
+            hh    = round(b.get("height", b["y_max"]-b["y_min"]), 1)
+            self.review_boxes_list.insert(
+                tk.END,
+                f"#{bid}  {cls}\n"
+                f"  ({b['x_min']:.0f},{b['y_min']:.0f}) → ({b['x_max']:.0f},{b['y_max']:.0f})\n"
+                f"  {ww}×{hh}px\n\n")
+        self.review_boxes_list.config(state=tk.DISABLED)
+
+        self.review_status.config(
+            text=f"✓ {len(boxes)} annotations | {os.path.basename(self.review_json_path)}")
+
+    def _review_scroll(self, event, delta=None):
+        d = delta if delta is not None else event.delta
+        self.review_canvas.yview_scroll(-1 if d > 0 else 1, "units")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.geometry("1300x780")
+    root.minsize(1000, 620)
+    app = CrowdAnnotatorPro(root)
+    root.mainloop()
