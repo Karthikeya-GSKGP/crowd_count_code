@@ -1,4 +1,4 @@
-# ODFNet: Occlusion-Density Fusion for Crowd Counting
+# Counting the Uncounted: Correcting Occlusion-caused Blind Spots in Crowd Counting Benchmarks
 
 This repository contains the code for **ODFNet**, an occlusion-aware crowd-counting framework for images with embedded occluders such as umbrellas and picket signs.
 
