@@ -14,8 +14,8 @@ Human Density + Umbrella Density + Pickets Density = Final Crowd Density
 
 | File | Description |
 |---|---|
-| `crowd_annotator_boxes.py` | Annotation tool for Human, Umbrella, and Pickets boxes |
-| `prepare_odfa_direct_json_dataset_no_comments.py` | Prepares train/val/test splits from image-level JSON labels |
+| `ODFlow.py` | Annotation tool for Human, Umbrella, and Pickets boxes |
+| `prepare.py` | Prepares train/val/test splits from image-level JSON labels |
 | `training_odf.py` | Trains ODFNet directly from JSON labels |
 | `testing_odf.py` | Tests trained models and performs density fusion |
 | `odfnet.py` | ODFNet model architecture |
@@ -62,7 +62,7 @@ pip install numpy opencv-python matplotlib pillow tqdm
 ## Dataset Preparation
 
 ```bash
-python prepare_odfa_direct_json_dataset_no_comments.py \
+python prepare.py \
   --image_dir /content/ODF-A/images \
   --json_dir /content/ODF-A/labels \
   --out_root /content/ODF-A-prepared \
